@@ -1,27 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readFile, readdir } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomBytes } from "node:crypto";
-import { PGlite } from "@electric-sql/pglite";
-import { PGLiteSocketServer } from "@electric-sql/pglite-socket";
-import { createDatabase } from "../server/database";
+import { testDatabase } from "./test-database";
 
 const run = promisify(execFile);
 
 test("committed migrations, seed and commerce invariants", { timeout: 120000 }, async (t) => {
-  const engine = await PGlite.create();
-  const migrations = new URL("../prisma/migrations/", import.meta.url);
-  for (const entry of (await readdir(migrations, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
-    if (entry.isDirectory()) await engine.exec(await readFile(new URL(`${entry.name}/migration.sql`, migrations), "utf8"));
-  }
-  const server = new PGLiteSocketServer({ db: engine, port: 0, host: "127.0.0.1", maxConnections: 5 });
-  await server.start();
-  const url = `postgresql://postgres:postgres@${server.getServerConn()}/postgres`;
-  const db = createDatabase(url);
+  const database = await testDatabase();
+  const { db, url } = database;
   const seedEnv: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: "test", DATABASE_URL: url, DIRECT_URL: url,
-    ALLOW_DEV_SEED: "true", SEED_CUSTOMER_PASSWORD: randomBytes(20).toString("hex"),
+    ALLOW_DEV_SEED: "true", ALLOW_REMOTE_TEST_SEED: "true", SEED_CUSTOMER_PASSWORD: randomBytes(20).toString("hex"),
     SEED_ADMIN_PASSWORD: randomBytes(20).toString("hex"),
   };
   const seed = (env = seedEnv) => run(process.execPath, ["--import", "tsx", "prisma/seed.ts"], { env, timeout: 45000 });
@@ -109,9 +99,7 @@ test("committed migrations, seed and commerce invariants", { timeout: 120000 }, 
       assert.equal(await db.orderItem.count({ where: { orderId: order.id } }), 1);
     });
   } finally {
-    await db.$disconnect();
-    await server.stop();
-    await engine.close();
+    await database.close();
   }
 });
 

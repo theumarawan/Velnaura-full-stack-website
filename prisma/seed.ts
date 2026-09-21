@@ -9,8 +9,11 @@ async function main() {
   if (process.env.NODE_ENV === "production" || process.env.ALLOW_DEV_SEED !== "true") {
     throw new Error("Seeding requires ALLOW_DEV_SEED=true and a non-production environment.");
   }
-  if (!["localhost", "127.0.0.1", "[::1]"].includes(new URL(url).hostname)) {
-    throw new Error("Development seed only accepts a loopback database host.");
+  const parsedUrl = new URL(url);
+  const isolatedTestSchema = /^velnaura_test_[a-f0-9]{20}$/.test(parsedUrl.searchParams.get("schema") ?? "");
+  const remoteTestSeed = process.env.NODE_ENV === "test" && process.env.ALLOW_REMOTE_TEST_SEED === "true" && isolatedTestSchema;
+  if (!["localhost", "127.0.0.1", "[::1]"].includes(parsedUrl.hostname) && !remoteTestSeed) {
+    throw new Error("Development seed only accepts a loopback database host or an isolated test schema.");
   }
   const customerPassword = process.env.SEED_CUSTOMER_PASSWORD ?? "";
   const adminPassword = process.env.SEED_ADMIN_PASSWORD ?? "";

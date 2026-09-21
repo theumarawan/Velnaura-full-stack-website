@@ -43,12 +43,20 @@ test("authentication HTTP flows", { timeout: 180000 }, async t => {
   }
   try {
     let ready = false;
-    for (let i = 0; i < 90; i++) {
+    let lastHealth = "no response";
+    const readyDeadline = Date.now() + 90_000;
+    while (Date.now() < readyDeadline) {
       if (child.exitCode !== null) throw new Error(`Next exited early: ${logs}`);
-      try { if ((await request("/api/health")).ok) { ready = true; break; } } catch { /* Retry until Next has bound its port. */ }
+      try {
+        const health = await fetch(`${origin}/api/health`, { headers: { origin }, signal: AbortSignal.timeout(10_000) });
+        lastHealth = `${health.status} ${await health.text()}`;
+        if (health.ok) { ready = true; break; }
+      } catch (error) {
+        lastHealth = error instanceof Error ? error.message : String(error);
+      }
       await new Promise(resolve => setTimeout(resolve, 300));
     }
-    assert.ok(ready, `Next did not start: ${logs}`);
+    assert.ok(ready, `Next did not become ready. Last health result: ${lastHealth}\n${logs}`);
     await t.test("account guard redirects unauthenticated visitors and auth forms render", async () => {
       const account = await request("/account");
       assert.equal(account.status, 307); assert.match(account.headers.get("location")!, /\/login/);

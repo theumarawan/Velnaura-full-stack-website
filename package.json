@@ -19,7 +19,8 @@
     "db:migrate:dev": "prisma migrate dev",
     "db:seed": "prisma db seed",
     "db:studio": "prisma studio",
-    "test": "tsx --test --test-concurrency=1 tests/*.test.ts"
+    "test": "tsx --test --test-concurrency=1 tests/*.test.ts",
+    "test:postgres": "node scripts/test-postgres.mjs"
   },
   "dependencies": {
     "@prisma/adapter-pg": "7.10.0",
