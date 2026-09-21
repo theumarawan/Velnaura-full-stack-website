@@ -1,0 +1,306 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  CUSTOMER
+  MODERATOR
+  ADMIN
+}
+
+enum ProductStatus {
+  DRAFT
+  ACTIVE
+}
+
+enum Currency {
+  PKR
+}
+
+enum OrderStatus {
+  PENDING
+  AWAITING_PAYMENT
+  PAID
+  FULFILLED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  CARD
+  BANK_TRANSFER
+  JAZZCASH
+  EASYPAISA
+  COD
+}
+
+enum PaymentProvider {
+  SAFEPAY
+  MANUAL
+  JAZZCASH
+  EASYPAISA
+}
+
+enum AnalyticsEventType {
+  PAGE_VIEW
+  PRODUCT_VIEW
+  ADD_TO_CART
+  REMOVE_FROM_CART
+  BEGIN_CHECKOUT
+  PURCHASE
+  NEWSLETTER_SIGNUP
+}
+
+model User {
+  id                  String               @id @default(cuid())
+  /// Unique normalized email prevents duplicate credential identities; SQL enforces lowercase/trim.
+  email               String               @unique @db.VarChar(254)
+  passwordHash        String               @db.Text
+  /// Incremented on password reset to revoke previously issued JWT sessions.
+  sessionVersion      Int                  @default(0)
+  /// Hashed, single-use reset grants are deleted with their account.
+  passwordResetTokens PasswordResetToken[]
+  emailVerified       DateTime?            @db.Timestamptz(3)
+  passwordChangedAt   DateTime?            @db.Timestamptz(3)
+  name                String?              @db.VarChar(120)
+  image               String?              @db.Text
+  phone               String?              @db.VarChar(32)
+  role                Role                 @default(CUSTOMER)
+  disabledAt          DateTime?            @db.Timestamptz(3)
+  createdAt           DateTime             @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime             @updatedAt @db.Timestamptz(3)
+  /// Owned addresses are deleted with the user; orders keep independent snapshots.
+  addresses           Address[]
+  /// Nullable ownership on Order allows guest checkout and retention after account deletion.
+  orders              Order[]
+  /// Analytics survives deletion without retaining a user foreign key.
+  analyticsEvents     AnalyticsEvent[]
+}
+
+model Address {
+  id          String   @id @default(cuid())
+  userId      String
+  /// Cascade removes personal address-book entries when their owner is deleted.
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label       String?  @db.VarChar(60)
+  recipient   String   @db.VarChar(120)
+  phone       String   @db.VarChar(32)
+  line1       String   @db.VarChar(200)
+  line2       String?  @db.VarChar(200)
+  city        String   @db.VarChar(100)
+  province    String   @db.VarChar(100)
+  postalCode  String?  @db.VarChar(20)
+  countryCode String   @default("PK") @db.Char(2)
+  /// SQL partial unique index + deferred trigger require exactly one default for a nonempty address book.
+  isDefault   Boolean  @default(false)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  /// Lists a user's saved addresses and supports the ownership FK.
+  @@index([userId])
+}
+
+model Product {
+  id          String           @id @default(cuid())
+  name        String           @db.VarChar(160)
+  /// Slug uniqueness gives every product a stable, unambiguous storefront URL.
+  slug        String           @unique @db.VarChar(180)
+  description String           @db.Text
+  /// Exact decimal PKR, never floating point; SQL rejects negative prices.
+  basePrice   Decimal          @db.Decimal(12, 2)
+  currency    Currency         @default(PKR)
+  status      ProductStatus    @default(DRAFT)
+  createdAt   DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime         @updatedAt @db.Timestamptz(3)
+  /// Separate ordered image records allow multiple assets and accessible alt text.
+  images      ProductImage[]
+  /// Every sellable size has its own inventory and SKU.
+  variants    ProductVariant[]
+  /// Purchased products cannot be hard deleted; use DRAFT to remove them from sale.
+  orderItems  OrderItem[]
+
+  /// Supports active catalog listing in deterministic creation order.
+  @@index([status, createdAt, id])
+}
+
+model ProductImage {
+  id        String  @id @default(cuid())
+  productId String
+  /// An image belongs to one product and is removed with an unpurchased product.
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  url       String  @db.Text
+  alt       String  @db.VarChar(240)
+  position  Int     @default(0)
+  width     Int?
+  height    Int?
+
+  /// A unique position ensures deterministic gallery ordering and covers the FK index.
+  @@unique([productId, position])
+}
+
+model ProductVariant {
+  id            String      @id @default(cuid())
+  productId     String
+  /// Restrict accidental product deletion while stock-bearing variants exist.
+  product       Product     @relation(fields: [productId], references: [id], onDelete: Restrict)
+  /// Globally unique stock identifier for fulfillment and future gateway metadata.
+  sku           String      @unique @db.VarChar(80)
+  size          String      @db.VarChar(80)
+  /// Null inherits basePrice at checkout; OrderItem stores the resolved price forever.
+  priceOverride Decimal?    @db.Decimal(12, 2)
+  stockQuantity Int         @default(0)
+  isActive      Boolean     @default(true)
+  createdAt     DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime    @updatedAt @db.Timestamptz(3)
+  /// Restrict deletion of purchased variants; deactivate them instead.
+  orderItems    OrderItem[]
+
+  /// Composite key lets OrderItem enforce that its variant belongs to its product.
+  @@unique([id, productId])
+  /// Prevents duplicate size choices within one product and indexes the product FK.
+  @@unique([productId, size])
+}
+
+model Order {
+  id                  String          @id @default(cuid())
+  /// Human-readable unique reference is independent of internal identifiers.
+  orderNumber         String          @unique @default(cuid()) @db.VarChar(40)
+  userId              String?
+  /// Guests have no user; deletion clears ownership but retains fulfillment/accounting history.
+  user                User?           @relation(fields: [userId], references: [id], onDelete: SetNull)
+  email               String          @db.VarChar(254)
+  phone               String          @db.VarChar(32)
+  status              OrderStatus     @default(PENDING)
+  paymentMethod       PaymentMethod
+  paymentProvider     PaymentProvider
+  /// Provider transaction/tracker ID; null before initiation and for unpaid manual orders.
+  paymentReference    String?         @db.VarChar(200)
+  currency            Currency        @default(PKR)
+  subtotal            Decimal         @db.Decimal(12, 2)
+  shippingAmount      Decimal         @default(0) @db.Decimal(12, 2)
+  taxAmount           Decimal         @default(0) @db.Decimal(12, 2)
+  discountAmount      Decimal         @default(0) @db.Decimal(12, 2)
+  totalAmount         Decimal         @db.Decimal(12, 2)
+  /// Typed snapshot fields deliberately have no Address FK: address edits cannot rewrite delivery history.
+  shippingRecipient   String          @db.VarChar(120)
+  shippingPhone       String          @db.VarChar(32)
+  shippingLine1       String          @db.VarChar(200)
+  shippingLine2       String?         @db.VarChar(200)
+  shippingCity        String          @db.VarChar(100)
+  shippingProvince    String          @db.VarChar(100)
+  shippingPostalCode  String?         @db.VarChar(20)
+  shippingCountryCode String          @default("PK") @db.Char(2)
+  placedAt            DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime        @updatedAt @db.Timestamptz(3)
+  paidAt              DateTime?       @db.Timestamptz(3)
+  fulfilledAt         DateTime?       @db.Timestamptz(3)
+  cancelledAt         DateTime?       @db.Timestamptz(3)
+  refundedAt          DateTime?       @db.Timestamptz(3)
+  /// Required line records retain immutable purchase descriptions and prices.
+  items               OrderItem[]
+
+  /// Provider-scoped uniqueness prevents one transaction being attached to two orders; nulls remain allowed.
+  @@unique([paymentProvider, paymentReference])
+  /// Account order history and fulfillment queue access paths.
+  @@index([userId, placedAt])
+  @@index([status, placedAt])
+  /// Guest lookup uses contact email plus a separately verified order reference in the future API.
+  @@index([email, placedAt])
+}
+
+model OrderItem {
+  id          String         @id @default(cuid())
+  orderId     String
+  /// Restrict deletion so an order with accounting records cannot be accidentally removed.
+  order       Order          @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  productId   String
+  product     Product        @relation(fields: [productId], references: [id], onDelete: Restrict)
+  variantId   String
+  /// Composite FK prevents mismatched product/variant pairs; all sellable products have a variant.
+  variant     ProductVariant @relation(fields: [variantId, productId], references: [id, productId], onDelete: Restrict)
+  productName String         @db.VarChar(160)
+  variantSize String         @db.VarChar(80)
+  sku         String         @db.VarChar(80)
+  quantity    Int
+  /// Resolved unit price at purchase, never joined from current product/variant prices.
+  unitPrice   Decimal        @db.Decimal(12, 2)
+  createdAt   DateTime       @default(now()) @db.Timestamptz(3)
+
+  /// Efficient receipt loading and referential checks during catalog maintenance.
+  @@index([orderId])
+  @@index([productId])
+  @@index([variantId, productId])
+}
+
+model NewsletterLead {
+  id             String    @id @default(cuid())
+  /// One normalized email per lead avoids duplicate sends; SQL enforces lowercase/trim.
+  email          String    @unique @db.VarChar(254)
+  phone          String?   @db.VarChar(32)
+  source         String    @db.VarChar(100)
+  consentAt      DateTime  @db.Timestamptz(3)
+  /// Records what the subscriber agreed to; leads do not require a customer account.
+  consentVersion String    @db.VarChar(40)
+  unsubscribedAt DateTime? @db.Timestamptz(3)
+  createdAt      DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(3)
+
+  /// Supports acquisition reporting without joining user identities.
+  @@index([source, createdAt])
+}
+
+model ContentBlock {
+  id            String   @id @default(cuid())
+  page          String   @db.VarChar(80)
+  key           String   @db.VarChar(100)
+  /// JSONB stores a versioned rich-text document; no deploy is needed to change copy.
+  content       Json     @db.JsonB
+  schemaVersion Int      @default(1)
+  /// Revision supports optimistic concurrency for the future editor.
+  revision      Int      @default(1)
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime @updatedAt @db.Timestamptz(3)
+
+  /// Keys are unique within a page so independent pages can each have an introduction block.
+  @@unique([page, key])
+}
+
+model AnalyticsEvent {
+  id        String             @id @default(cuid())
+  type      AnalyticsEventType
+  /// Anonymous session identifier, not an Auth.js token or FK; works for guest browsing.
+  sessionId String?            @db.VarChar(100)
+  userId    String?
+  /// Optional attribution is cleared on account deletion; metadata must exclude PII/secrets.
+  user      User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+  metadata  Json               @default("{}") @db.JsonB
+  timestamp DateTime           @default(now()) @db.Timestamptz(3)
+
+  /// Time-bounded funnels, session timelines, user histories, and retention cleanup.
+  @@index([type, timestamp])
+  @@index([sessionId, timestamp])
+  @@index([userId, timestamp])
+  @@index([timestamp])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  /// A hash of the entire signed token; the raw bearer secret is never stored.
+  tokenHash String    @unique @db.Char(64)
+  userId    String
+  /// Reset grants cannot outlive their identity; deleting a user removes them.
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime  @db.Timestamptz(3)
+  usedAt    DateTime? @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @db.Timestamptz(3)
+
+  /// Supports invalidating all outstanding grants for one account after reset.
+  @@index([userId])
+  /// Supports deleting expired grants without a full scan.
+  @@index([expiresAt])
+}

@@ -1,0 +1,7 @@
+saveExact: true
+allowBuilds:
+  '@prisma/engines': true
+  prisma: true
+  esbuild: true
+  sharp: true
+  unrs-resolver: true
